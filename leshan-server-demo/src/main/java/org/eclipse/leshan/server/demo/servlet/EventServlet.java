@@ -12,9 +12,13 @@
  * 
  * Contributors:
  *     Sierra Wireless - initial API and implementation
+ *     
+ * Change Log:
+ * Vibhor 28/07/2017 Added Influx DB support for Project Implementation
  *******************************************************************************/
 package org.eclipse.leshan.server.demo.servlet;
 
+import java.awt.Point;
 import java.awt.Window.Type;
 import java.io.IOException;
 import java.util.Collection;
@@ -46,15 +50,14 @@ import org.eclipse.leshan.server.registration.RegistrationUpdate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.db.influxdb.DataWriter;
-import com.db.influxdb.Utilities;
-//import com.eclipsesource.json.JsonObject;
+import org.influxdb.InfluxDB;
+import org.influxdb.InfluxDBFactory;
+import org.influxdb.InfluxDB.ConsistencyLevel;
+import org.influxdb.dto.Pong;
+
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
-import org.eclipse.leshan.server.influxdb.InfluxMain;
-import org.eclipse.leshan.server.influxdb.InfluxPost;
-import org.eclipse.leshan.server.influxdb.InfluxReader;
 
 class valueObject{
 	int id;
@@ -93,7 +96,7 @@ public class EventServlet extends EventSourceServlet {
 	
 	private static final String HOST_PASSWORD = "root";
 	
-	private static final String DB_NAME = "performance";
+	private static final String DB_NAME = "dataghost";
 	
     private static final String EVENT_DEREGISTRATION = "DEREGISTRATION";
 
@@ -106,25 +109,37 @@ public class EventServlet extends EventSourceServlet {
     private static final String EVENT_COAP_LOG = "COAPLOG";
 
     private static final String QUERY_PARAM_ENDPOINT = "ep";
+    
+    private static final String RETENTION_POLICY = "two_hours";
 
     private static final long serialVersionUID = 1L;
 
     private static final Logger LOG = LoggerFactory.getLogger(EventServlet.class);
 
     private final Gson gson;
+    
+    private String url;
+	
+	private String measurement;
+	private String writeLine;
+	
+    private StringBuilder value;
+    private StringBuilder tags;
+    
+    
+    
+    private InfluxDB influxDB;
 
+	InfluxDB.LogLevel logLevel;
+	InfluxDB.ConsistencyLevel consistencyLevel;
+	org.influxdb.dto.Point p1;
 
-    Map<String, String> tags; 
-	Map<String, Object> fields;
     
     private final CoapMessageTracer coapMessageTracer;
 
     private Set<LeshanEventSource> eventSources = Collections
             .newSetFromMap(new ConcurrentHashMap<LeshanEventSource, Boolean>());
 
-    InfluxPost influxObject;
-    
-    DataWriter dataWriter;
     
     private final RegistrationListener registrationListener = new RegistrationListener() {
 
@@ -132,9 +147,6 @@ public class EventServlet extends EventSourceServlet {
         public void registered(Registration registration, Registration previousReg,
                 Collection<Observation> previousObsersations) {
             String jReg = EventServlet.this.gson.toJson(registration);
-
-            tags = new HashMap<>();
-            fields = new HashMap<>();
             
             sendEvent(EVENT_REGISTRATION, jReg, registration.getEndpoint());
             
@@ -157,13 +169,19 @@ public class EventServlet extends EventSourceServlet {
 
     private final ObservationListener observationListener = new ObservationListener() {
 
+    	
         @Override
         public void cancelled(Observation observation) {
         }
 
+        
         @Override
         public void onResponse(Observation observation, Registration registration, ObserveResponse response) {
-            
+   
+        	float temperature;
+        	value = new StringBuilder();
+        	tags = new StringBuilder();
+        	
         	if (LOG.isDebugEnabled()) {
                 LOG.debug("Received notification from [{}] containing value [{}]", observation.getPath(),
                         response.getContent().toString());
@@ -176,49 +194,114 @@ public class EventServlet extends EventSourceServlet {
                 String tempJson = gson.toJson(response.getContent());
                 valueObject vO = new Gson().fromJson(tempJson, valueObject.class);
                 
+                measurement = registration.getEndpoint().toString();
                 
                 System.out.println("IT came here....Came here");
                 if((observation.getPath().toString().split("/")[1]).equals("3349"))
                 {
                 	System.out.println("Came here");
-                	tags.put("Object Name","Device");
+                	
+                	tags.append("Object=Device");
                 }
+                
                 if((observation.getPath().toString().split("/")[3]).equals("5851"))
                 {
-                	fields.put("Instance", observation.getPath().toString().split("/")[2]);
-                	fields.put("Resource", "CPULoad");
+                	
                 	System.out.println(vO.getValue()/1000);
                 	float cpu_load = (float)vO.getValue()/1000;
-                	fields.put("Value", cpu_load);
+                	
+                	value.append("Instance=").append(observation.getPath().toString().split("/")[2]);
+                	value.append(",");
+                	value.append("Resource=").append("CpuLoad");
+                	value.append(",");
+                	value.append("Value=").append(cpu_load);
+                	
+                	System.out.println("Value field is "+value);
+                	
+                	p1 = org.influxdb.dto.Point.measurement(measurement).addField("Instance", observation.getPath().toString().split("/")[2])
+                														.addField("Resource", "CpuLoad")
+                														.addField("Value",cpu_load)
+                														.tag("Object", "Device")
+                														.build();
                 }
                 else
                     if((observation.getPath().toString().split("/")[3]).equals("5850"))
                     {
-                    	fields.put("Instance", observation.getPath().toString().split("/")[2]);
-                    	fields.put("Resource", "SystemTemperature");
-                    	System.out.println(vO.getValue());
-                    	float temperature = (float)vO.getValue()/1000;
-                    	fields.put("Value",temperature );
+                    	
+                    	temperature = (float)vO.getValue()/1000;
+                    	//fields.put("Value",temperature );
+                    	value.append("Instance=").append(observation.getPath().toString().split("/")[2]);
+                    	value.append(",");
+                    	value.append("Resource=").append("SystemTemperature");
+                    	value.append(",");
+                    	value.append("Value=").append(temperature);
+                    	
+                    	System.out.println("Value field is "+value);
+                    
+                    	p1 = org.influxdb.dto.Point.measurement(measurement).addField("Instance", observation.getPath().toString().split("/")[2])
+								   .addField("Resource", "SystemTemperature")
+								   .addField("Value", temperature)
+								   .tag("Object", "Device")
+								   .build();
+                    
                     }
-                influxObject = new InfluxPost(HOST_ADDR,HOST_PORT, HOST_USERNAME, HOST_PASSWORD , DB_NAME ,registration.getEndpoint().toString(),
-                	tags, fields);
-                dataWriter = influxObject.connectDb();
+                    else
+                        if((observation.getPath().toString().split("/")[3]).equals("5852"))
+                        {
+                        	float avg_load1 = (float)vO.getValue()/100;
+                        
+                        	p1 = org.influxdb.dto.Point.measurement(measurement).addField("Instance", observation.getPath().toString().split("/")[2])
+    								   .addField("Resource", "AvgLoad1Min")
+    								   .addField("Value", avg_load1)
+    								   .tag("Object", "Device")
+    								   .build();
+                        
+                        }
+                        else
+                            if((observation.getPath().toString().split("/")[3]).equals("5853"))
+                            {
+                            	float avg_load1 = (float)vO.getValue()/100;
+                            
+                            	p1 = org.influxdb.dto.Point.measurement(measurement).addField("Instance", observation.getPath().toString().split("/")[2])
+        								   .addField("Resource", "AvgLoad5Min")
+        								   .addField("Value", avg_load1)
+        								   .tag("Object", "Device")
+        								   .build();
+                            
+                            }
+                            else
+                                if((observation.getPath().toString().split("/")[3]).equals("5854"))
+                                {
+                                	float avg_load1 = (float)vO.getValue()/100;
+                                
+                                	p1 = org.influxdb.dto.Point.measurement(measurement).addField("Instance", observation.getPath().toString().split("/")[2])
+            								   .addField("Resource", "AvgLoad15Min")
+            								   .addField("Value", avg_load1)
+            								   .tag("Object", "Device")
+            								   .build();
+                                
+                                }
                 
-                try {
-        			influxObject.PostData(dataWriter);
-        		} catch (Exception e) {
-        			e.printStackTrace();
-        		}
-//        			System.out.println("Trying Again");
-//        			try {
-//        				influxObject.PostData(dataWriter, tags, fields);
-//        				System.out.println("Successfully Created");
-//        
-//        			} catch (Exception e1) {
-//        				// TODO Auto-generated catch block
-//        				e1.printStackTrace();
-//        			}
-        	//	}
+                
+                
+                url = "http://".concat(HOST_ADDR+":"+HOST_PORT);
+                
+                influxDB = InfluxDBFactory.connect(url,"root","root");
+                
+                influxDB.setRetentionPolicy(RETENTION_POLICY);
+                              
+                if(!influxDB.databaseExists(DB_NAME))
+                	influxDB.createDatabase(DB_NAME);
+                
+                writeLine = measurement+","+tags+" "+value;
+                
+                System.out.println(writeLine);
+                
+                influxDB.setLogLevel(InfluxDB.LogLevel.BASIC);
+                
+                //influxDB.write(DB_NAME,RETENTION_POLICY,InfluxDB.ConsistencyLevel.ONE,writeLine);
+                influxDB.write(DB_NAME,RETENTION_POLICY,p1);
+                
                 sendEvent(EVENT_NOTIFICATION, data, registration.getEndpoint());
             }
     }
